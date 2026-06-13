@@ -1,5 +1,5 @@
 """
-Grid planning helpers: BFS, optional line-of-sight pruning, and corner rounding.
+Grid planning helpers: BFS, collinear simplification, and corner rounding.
 """
 
 from collections import deque
@@ -52,55 +52,6 @@ def bfs_path(
     return list(reversed(path))
 
 
-def _bresenham_cells(a, b):
-    r0, c0 = map(int, map(round, a))
-    r1, c1 = map(int, map(round, b))
-    dr = abs(r1 - r0)
-    dc = abs(c1 - c0)
-    sr = 1 if r0 < r1 else -1
-    sc = 1 if c0 < c1 else -1
-    err = dr - dc
-
-    cells = []
-    r, c = r0, c0
-    while True:
-        cells.append((r, c))
-        if r == r1 and c == c1:
-            break
-        e2 = 2 * err
-        if e2 > -dc:
-            err -= dc
-            r += sr
-        if e2 < dr:
-            err += dr
-            c += sc
-    return cells
-
-
-def _line_is_free(a, b, grid: np.ndarray) -> bool:
-    rows, cols = grid.shape
-    for r, c in _bresenham_cells(a, b):
-        if r < 0 or r >= rows or c < 0 or c >= cols:
-            return False
-        if grid[r, c] != 0:
-            return False
-    return True
-
-
-def line_of_sight_smooth(path: list, grid: np.ndarray) -> list:
-    if len(path) <= 2:
-        return list(path)
-    smooth = [path[0]]
-    i = 0
-    while i < len(path) - 1:
-        j = len(path) - 1
-        while j > i + 1 and not _line_is_free(path[i], path[j], grid):
-            j -= 1
-        smooth.append(path[j])
-        i = j
-    return smooth
-
-
 def simplify_collinear(path: list) -> list[tuple[float, float]]:
     """
     Remove only redundant points on the same 4-connected corridor.
@@ -141,25 +92,72 @@ def corner_round(path: list, n_subdiv: int = 3) -> list[tuple[float, float]]:
         p_prev = np.array(path[i - 1], dtype=float)
         p = np.array(path[i], dtype=float)
         p_next = np.array(path[i + 1], dtype=float)
-        v_in = p_prev - p
-        v_out = p_next - p
-        v_in_norm = np.linalg.norm(v_in)
-        v_out_norm = np.linalg.norm(v_out)
+        d_in = p - p_prev
+        d_out = p_next - p
+        len_in = np.linalg.norm(d_in)
+        len_out = np.linalg.norm(d_out)
 
-        if v_in_norm < 1e-9 or v_out_norm < 1e-9:
+        if len_in < 1e-9 or len_out < 1e-9:
             continue
-        u_in = v_in / v_in_norm
-        u_out = v_out / v_out_norm
-        if abs(np.dot(u_in, u_out) + 1.0) < 1e-9:
+        u_in = d_in / len_in
+        u_out = d_out / len_out
+        turn_cos = float(np.clip(np.dot(u_in, u_out), -1.0, 1.0))
+        if abs(turn_cos - 1.0) < 1e-9:
             rounded.append(tuple(p))
             continue
 
-        a = p + min(radius, 0.45 * v_in_norm) * u_in
-        b = p + min(radius, 0.45 * v_out_norm) * u_out
+        turn_angle = float(np.arccos(turn_cos))
+        tangent_offset = radius / np.tan(0.5 * turn_angle)
+        tangent_offset = min(tangent_offset, 0.45 * len_in, 0.45 * len_out)
+        effective_radius = tangent_offset * np.tan(0.5 * turn_angle)
+        if effective_radius < 1e-9:
+            rounded.append(tuple(p))
+            continue
+
+        a = p - tangent_offset * u_in
+        b = p + tangent_offset * u_out
+        perp_in = np.array([-u_in[1], u_in[0]], dtype=float)
+        perp_out = np.array([-u_out[1], u_out[0]], dtype=float)
+
+        center = None
+        best_err = np.inf
+        for sign_in in (-1.0, 1.0):
+            for sign_out in (-1.0, 1.0):
+                n_in = sign_in * perp_in
+                n_out = sign_out * perp_out
+                mat = np.column_stack((n_in, -n_out))
+                det = np.linalg.det(mat)
+                if abs(det) < 1e-9:
+                    continue
+                s, t = np.linalg.solve(mat, b - a)
+                candidate = a + s * n_in
+                err = (
+                    abs(np.linalg.norm(candidate - a) - effective_radius)
+                    + abs(np.linalg.norm(candidate - b) - effective_radius)
+                )
+                if err < best_err:
+                    best_err = err
+                    center = candidate
+
+        if center is None:
+            rounded.append(tuple(p))
+            continue
+
+        r_a = a - center
+        r_b = b - center
+        theta_a = float(np.arctan2(r_a[1], r_a[0]))
+        theta_b = float(np.arctan2(r_b[1], r_b[0]))
+        travel_ccw = np.dot(np.array([-r_a[1], r_a[0]]), u_in) > 0.0
+
         rounded.append(tuple(a))
         for k in range(1, n_subdiv + 1):
-            s = k / (n_subdiv + 1)
-            q = (1.0 - s) ** 2 * a + 2.0 * (1.0 - s) * s * p + s**2 * b
+            alpha = k / (n_subdiv + 1)
+            if travel_ccw:
+                delta = (theta_b - theta_a) % (2.0 * np.pi)
+            else:
+                delta = -((theta_a - theta_b) % (2.0 * np.pi))
+            theta = theta_a + alpha * delta
+            q = center + effective_radius * np.array([np.cos(theta), np.sin(theta)])
             rounded.append(tuple(q))
         rounded.append(tuple(b))
 

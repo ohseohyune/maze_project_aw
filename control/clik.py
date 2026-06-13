@@ -24,7 +24,7 @@ def _solve_joint_update(J: np.ndarray, control: np.ndarray, method: str, damping
     raise ValueError(f"Unknown CLIK method: {method}")
 
 
-def clik_step(
+def clik_one_step(
     theta,
     T_des,
     B_list,
@@ -33,8 +33,8 @@ def clik_step(
     dt,
     method: str = "dls",
     damping: float = 0.05,
-    q_lo: np.ndarray = None,
-    q_hi: np.ndarray = None,
+    joint_lower_limits: np.ndarray = None,
+    joint_upper_limits: np.ndarray = None,
 ) -> np.ndarray:
     theta = np.asarray(theta, dtype=float).reshape(-1)
     T_cur = body_poe_fk(theta, B_list, M)
@@ -44,9 +44,17 @@ def clik_step(
     theta_dot = _solve_joint_update(Jb, control, method, damping)
     theta_new = theta + theta_dot * dt
 
-    if q_lo is not None or q_hi is not None:
-        lo = -np.inf if q_lo is None else np.asarray(q_lo, dtype=float)
-        hi = np.inf if q_hi is None else np.asarray(q_hi, dtype=float)
+    if joint_lower_limits is not None or joint_upper_limits is not None:
+        lo = (
+            -np.inf
+            if joint_lower_limits is None
+            else np.asarray(joint_lower_limits, dtype=float)
+        )
+        hi = (
+            np.inf
+            if joint_upper_limits is None
+            else np.asarray(joint_upper_limits, dtype=float)
+        )
         theta_new = np.clip(theta_new, lo, hi)
     return theta_new
 
@@ -59,8 +67,8 @@ def solve_ik(
     K_p,
     max_iter=200,
     tol=1e-4,
-    q_lo=None,
-    q_hi=None,
+    joint_lower_limits=None,
+    joint_upper_limits=None,
     method: str = "dls",
     damping: float = 0.05,
     dt: float = 0.05,
@@ -82,7 +90,7 @@ def solve_ik(
         Jb = body_jacobian(q, B_list)
         cond = np.linalg.cond(Jb)
         step_damping = damping if np.isfinite(cond) and cond < 1e4 else max(damping, 0.1)
-        q = clik_step(
+        q = clik_one_step(
             q,
             T_des,
             B_list,
@@ -91,8 +99,8 @@ def solve_ik(
             dt,
             method=method,
             damping=step_damping,
-            q_lo=q_lo,
-            q_hi=q_hi,
+            joint_lower_limits=joint_lower_limits,
+            joint_upper_limits=joint_upper_limits,
         )
 
     return best_q, False
@@ -110,8 +118,8 @@ def run_clik(
     delta=0.05,
     method: str = "dls",
     damping: float = 0.05,
-    q_lo=None,
-    q_hi=None,
+    joint_lower_limits=None,
+    joint_upper_limits=None,
 ) -> dict:
     theta = np.asarray(theta_init, dtype=float).copy()
     T_start = body_poe_fk(theta, B_list, M)
@@ -126,7 +134,7 @@ def run_clik(
 
     for k, t in enumerate(time_steps):
         T_des = target_trajectory(T_start, t_start, t_end, t, delta)
-        theta = clik_step(
+        theta = clik_one_step(
             theta,
             T_des,
             B_list,
@@ -135,8 +143,8 @@ def run_clik(
             dt,
             method=method,
             damping=damping,
-            q_lo=q_lo,
-            q_hi=q_hi,
+            joint_lower_limits=joint_lower_limits,
+            joint_upper_limits=joint_upper_limits,
         )
 
         T_cur = body_poe_fk(theta, B_list, M)

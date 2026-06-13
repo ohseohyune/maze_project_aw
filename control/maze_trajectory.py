@@ -4,6 +4,8 @@ Joint-space trajectory generation for the maze path.
 
 import numpy as np
 
+from reference.dream_math import cubic_spline
+
 
 def allocate_segment_times(
     q_path: np.ndarray,
@@ -98,7 +100,7 @@ def joint_spline_traj(
     - q_path는 waypoint별 joint angle이다.
     - seg_times는 각 waypoint에 도착해야 하는 누적 시간이다.
     - 현재 시간 t가 어느 segment에 있는지 찾는다.
-    - 해당 segment 안에서 cubic Hermite spline으로 q, qdot, qddot을 보간한다.
+    - 해당 segment 안에서 reference.dream_math.cubic_spline으로 q를 보간한다.
     - 반환값은 q_des, qdot_des, qddot_des이다.
     """
     q_path = np.asarray(q_path, dtype=float)
@@ -138,26 +140,16 @@ def joint_spline_traj(
     v0 = qdot_path[idx]
     v1 = qdot_path[idx + 1]
 
-    # - cubic Hermite basis
-    # - q0/q1 위치와 v0/v1 속도를 모두 만족하도록 q를 보간한다.
-    h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
-    h10 = s**3 - 2.0 * s**2 + s
-    h01 = -2.0 * s**3 + 3.0 * s**2
-    h11 = s**3 - s**2
-    q = h00 * q0 + h10 * h * v0 + h01 * q1 + h11 * h * v1
+    # - reference.dream_math의 cubic_spline을 사용해 q0/q1 위치와 v0/v1 속도를 만족하도록 보간한다.
+    q = cubic_spline(t, t0, t1, q0, q1, v0, v1)
 
-    # - 위 spline을 시간으로 한 번 미분해서 qdot을 계산한다.
-    dh00 = 6.0 * s**2 - 6.0 * s
-    dh10 = 3.0 * s**2 - 4.0 * s + 1.0
-    dh01 = -6.0 * s**2 + 6.0 * s
-    dh11 = 3.0 * s**2 - 2.0 * s
-    qdot = (dh00 * q0 + dh10 * h * v0 + dh01 * q1 + dh11 * h * v1) / h
-
-    # - spline을 시간으로 두 번 미분해서 qddot을 계산한다.
-    ddh00 = 12.0 * s - 6.0
-    ddh10 = 6.0 * s - 4.0
-    ddh01 = -12.0 * s + 6.0
-    ddh11 = 6.0 * s - 2.0
-    qddot = (ddh00 * q0 + ddh10 * h * v0 + ddh01 * q1 + ddh11 * h * v1) / h**2
+    # - cubic_spline은 위치만 반환하므로 같은 3차 다항식 계수에서 qdot/qddot을 해석적으로 계산한다.
+    total_q = q1 - q0
+    a1 = v0
+    a2 = 3.0 * total_q / h**2 - 2.0 * v0 / h - v1 / h
+    a3 = -2.0 * total_q / h**3 + (v0 + v1) / h**2
+    t_elapsed = t - t0
+    qdot = a1 + 2.0 * a2 * t_elapsed + 3.0 * a3 * t_elapsed**2
+    qddot = 2.0 * a2 + 6.0 * a3 * t_elapsed
 
     return q, qdot, qddot

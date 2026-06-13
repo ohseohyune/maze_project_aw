@@ -16,8 +16,8 @@ sys.path.insert(0, ROOT)
 
 from control.maze_trajectory import allocate_segment_times  # noqa: E402
 from maze.parser import read_occupancy_grid, validate_start_goal  # noqa: E402
-from maze.planner import bfs_path  # noqa: E402
-from maze_main import (  # noqa: E402
+from maze.planner_BFS import bfs_path  # noqa: E402
+from maze_bfs_main import (  # noqa: E402
     HERE,
     ACTUATOR_FORCE_LIMIT,
     ACTUATOR_KP_SCALE,

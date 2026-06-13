@@ -19,7 +19,7 @@ from maze.geometry import (
     cell_to_world,
 )
 from maze.parser import read_occupancy_grid, validate_start_goal
-from maze.planner import (
+from maze.planner_BFS import (
     bfs_path,
     corner_round,
     resample_path,
@@ -74,8 +74,8 @@ def build_joint_path(csv_path: str, q_init: np.ndarray):
             K_p,
             max_iter=600,
             tol=2e-4,
-            q_lo=Q_MIN,
-            q_hi=Q_MAX,
+            joint_lower_limits=Q_MIN,
+            joint_upper_limits=Q_MAX,
             damping=0.06,
             dt=0.04,
         )
@@ -243,6 +243,93 @@ def write_planned_path_scene(base_xml_path: str, output_xml_path: str, T_targets
     return output_xml_path
 
 
+def write_simplified_path_scene(
+    base_xml_path: str,
+    output_xml_path: str,
+    simplified_path: list,
+) -> str:
+    """Add post-simplify_collinear path markers to the MuJoCo maze body."""
+    tree = ET.parse(base_xml_path)
+    root = tree.getroot()
+
+    asset = root.find("asset")
+    if asset is not None and asset.find("material[@name='simplified_path']") is None:
+        ET.SubElement(
+            asset,
+            "material",
+            {
+                "name": "simplified_path",
+                "rgba": "1.00 0.05 0.00 1.00",
+                "emission": "0.45",
+            },
+        )
+    if asset is not None and asset.find("material[@name='simplified_waypoint']") is None:
+        ET.SubElement(
+            asset,
+            "material",
+            {
+                "name": "simplified_waypoint",
+                "rgba": "1.00 0.85 0.00 1.00",
+                "emission": "0.50",
+            },
+        )
+
+    maze_body = root.find(".//body[@name='maze']")
+    if maze_body is None:
+        raise RuntimeError("Could not find maze body in scene XML")
+
+    for geom in list(maze_body):
+        name = geom.attrib.get("name", "")
+        if (
+            name.startswith("raw_grid_path_")
+            or name.startswith("raw_grid_waypoint_")
+            or name.startswith("simplified_path_")
+            or name.startswith("simplified_waypoint_")
+        ):
+            maze_body.remove(geom)
+
+    points = []
+    for r, c in simplified_path:
+        p_world, _ = cell_to_world(r, c, hover=0.025)
+        points.append(p_world - MAZE_POS_WORLD)
+
+    for i, (p0, p1) in enumerate(zip(points[:-1], points[1:])):
+        ET.SubElement(
+            maze_body,
+            "geom",
+            {
+                "name": f"simplified_path_seg_{i:03d}",
+                "type": "capsule",
+                "fromto": (
+                    f"{p0[0]:.5f} {p0[1]:.5f} {p0[2]:.5f} "
+                    f"{p1[0]:.5f} {p1[1]:.5f} {p1[2]:.5f}"
+                ),
+                "size": "0.0045",
+                "material": "simplified_path",
+                "contype": "0",
+                "conaffinity": "0",
+            },
+        )
+
+    for i, p in enumerate(points):
+        ET.SubElement(
+            maze_body,
+            "geom",
+            {
+                "name": f"simplified_waypoint_{i:03d}",
+                "type": "sphere",
+                "pos": f"{p[0]:.5f} {p[1]:.5f} {p[2]:.5f}",
+                "size": "0.0070",
+                "material": "simplified_waypoint",
+                "contype": "0",
+                "conaffinity": "0",
+            },
+        )
+
+    tree.write(output_xml_path, encoding="utf-8", xml_declaration=True)
+    return output_xml_path
+
+
 def configure_tracking_actuators(
     robot: OMYRobot,
     kp_scale: float = ACTUATOR_KP_SCALE,
@@ -288,7 +375,11 @@ def simulate_headless(robot: OMYRobot, q_path: np.ndarray, cell_path: list, seg_
     for step in range(n_steps):
         t = step * robot.model.opt.timestep
         q_des, qdot_des, _ = joint_spline_traj(min(t, seg_times[-1]), q_path, seg_times)
-        q_cmd = np.clip(q_des + TRACKING_LEAD_TIME * qdot_des, Q_MIN, Q_MAX)
+        q_cmd = np.clip(
+            q_des + TRACKING_LEAD_TIME * qdot_des,
+            robot.arm_qpos_lo,
+            robot.arm_qpos_hi,
+        )
         robot.data.ctrl[robot.arm_act_ids] = q_cmd
         robot.data.qfrc_applied[:] = 0.0
         robot.data.qfrc_applied[robot.arm_qpos_adrs] = robot.data.qfrc_bias[
@@ -333,8 +424,8 @@ def main():
     planned_xml_path = os.path.join(
         HERE, "reference", "robotis_omy", "scene_maze_planned.xml"
     )
-    # csv_path = os.path.join(HERE, "maze_occupancy_grid.csv")
-    csv_path = os.path.join(HERE, "generated_mazes", "random_maze_03.csv")
+    csv_path = os.path.join(HERE, "maze_occupancy_grid.csv")
+    # csv_path = os.path.join(HERE, "generated_mazes", "random_maze_02.csv")
 
 
     write_maze_walls_scene(csv_path, xml_path)
@@ -342,6 +433,11 @@ def main():
     q_seed = np.deg2rad(np.array([0, -45, 90, -45, 90, 0], dtype=float))
     q_path, cell_path, T_targets = build_joint_path(csv_path, q_seed)
     write_planned_path_scene(xml_path, planned_xml_path, T_targets)
+    grid = read_occupancy_grid(csv_path)
+    start, goal = validate_start_goal(grid)
+    raw_path = bfs_path(grid, start, goal)
+    simplified_path = simplify_collinear(raw_path)
+    write_simplified_path_scene(planned_xml_path, planned_xml_path, simplified_path)
     robot = OMYRobot(OMYConfig(xml_path=planned_xml_path, tcp_offset_in_ee=TIP_OFFSET))
     configure_tracking_actuators(robot)
 
@@ -351,6 +447,7 @@ def main():
         seg_times = seg_times * (TARGET_TOTAL_TIME / seg_times[-1])
 
     print(f"Waypoints: {len(cell_path)}")
+    print(f"Simplified BFS path points: {len(simplified_path)}")
     print(f"Estimated total time: {seg_times[-1]:.2f}s")
     print(f"Start q(deg): {np.rad2deg(q_path[0])}")
     print(f"Goal  q(deg): {np.rad2deg(q_path[-1])}")
@@ -377,14 +474,33 @@ def main():
     wall_collision_count = 0
     goal_wall_elapsed = None
     goal_sim_time = None
-    with mujoco.viewer.launch_passive(robot.model, robot.data) as viewer:
+    start_state = {"started": False, "t0": None}
+
+    def key_callback(key):
+        if key == ord(" ") and not start_state["started"]:
+            start_state["started"] = True
+            start_state["t0"] = time.perf_counter()
+            print("Started trajectory.")
+
+    print("Press SPACE in the MuJoCo viewer to start.")
+    with mujoco.viewer.launch_passive(
+        robot.model,
+        robot.data,
+        key_callback=key_callback,
+    ) as viewer:
         # Contact visualization: 키보드 'C'와 'D'로 활성화 가능
         # C: Contact points 표시/숨김
         # D: Contact forces 토글
-        
-        t0 = time.perf_counter()
+
         while viewer.is_running():
-            t = time.perf_counter() - t0
+            if not start_state["started"]:
+                robot.data.ctrl[robot.arm_act_ids] = q_path[0]
+                mujoco.mj_forward(robot.model, robot.data)
+                viewer.sync()
+                time.sleep(0.01)
+                continue
+
+            t = time.perf_counter() - start_state["t0"]
             if goal_wall_elapsed is None and t >= seg_times[-1]:
                 goal_wall_elapsed = t
                 goal_sim_time = robot.data.time
@@ -392,7 +508,11 @@ def main():
                     break
 
             q_des, qdot_des, _ = joint_spline_traj(t, q_path, seg_times)
-            q_cmd = np.clip(q_des + TRACKING_LEAD_TIME * qdot_des, Q_MIN, Q_MAX)
+            q_cmd = np.clip(
+                q_des + TRACKING_LEAD_TIME * qdot_des,
+                robot.arm_qpos_lo,
+                robot.arm_qpos_hi,
+            )
             robot.data.ctrl[robot.arm_act_ids] = q_cmd
             # robot.data.qfrc_applied[robot.arm_qpos_adrs] = robot.data.qfrc_bias[
             #     robot.arm_qpos_adrs
@@ -409,7 +529,11 @@ def main():
 
     tip_pos = robot.tcp_position_world()
     if goal_wall_elapsed is None:
-        goal_wall_elapsed = time.perf_counter() - t0
+        goal_wall_elapsed = (
+            time.perf_counter() - start_state["t0"]
+            if start_state["started"]
+            else 0.0
+        )
         goal_sim_time = robot.data.time
     print(f"Actual wall-clock start-to-goal time: {goal_wall_elapsed:.2f}s")
     print(f"MuJoCo sim time at goal command: {goal_sim_time:.2f}s")

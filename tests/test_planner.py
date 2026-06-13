@@ -1,10 +1,9 @@
 import os
 
 from maze.parser import read_occupancy_grid
-from maze.planner import (
+from maze.planner_BFS import (
     bfs_path,
     corner_round,
-    line_of_sight_smooth,
     resample_path,
     simplify_collinear,
     validate_free_path,
@@ -23,13 +22,13 @@ def test_bfs_sample_maze():
         assert grid[r, c] == 0
 
 
-def test_smoothing_keeps_endpoints():
+def test_simplify_and_rounding_keep_endpoints():
     grid = read_occupancy_grid(os.path.join(HERE, "maze_occupancy_grid.csv"))
     path = bfs_path(grid, (1, 1), (10, 10))
-    smooth = line_of_sight_smooth(path, grid)
-    rounded = corner_round(smooth)
-    assert smooth[0] == path[0]
-    assert smooth[-1] == path[-1]
+    simplified = simplify_collinear(path)
+    rounded = corner_round(simplified)
+    assert simplified[0] == (1.0, 1.0)
+    assert simplified[-1] == (10.0, 10.0)
     assert rounded[0] == (1.0, 1.0)
     assert rounded[-1] == (10.0, 10.0)
 
